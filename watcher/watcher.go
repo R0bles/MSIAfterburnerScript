@@ -34,6 +34,11 @@ var (
 	procTranslateMessage         = user32.NewProc("TranslateMessage")
 	procDispatchMessageW         = user32.NewProc("DispatchMessageW")
 
+	// Global state for window enumeration to avoid recreating callbacks
+	enumKeywords    []string
+	enumFoundKeyword string
+	enumCallback     uintptr
+
 	kernel32        = windows.NewLazySystemDLL("kernel32.dll")
 	procOpenProcess = kernel32.NewProc("OpenProcess")
 	procCloseHandle = kernel32.NewProc("CloseHandle")
@@ -46,6 +51,12 @@ var (
 func StartEventWatcher(handler func()) {
 	go func() {
 		winEventProc := syscall.NewCallback(func(hWinEventHook syscall.Handle, event uint32, hwnd syscall.Handle, idObject int32, idChild int32, idEventThread uint32, dwmsEventTime uint32) uintptr {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("Recovered from panic in event watcher callback: %v", r)
+				}
+			}()
+
 			handler()
 			return 0
 		})
@@ -104,7 +115,7 @@ func FirstActiveTarget(targets map[string]string) (string, bool) {
 	if name, ok := getForegroundTarget(keywords); ok {
 		return name, true
 	}
-	if name, ok := isProcessActive(keywords); ok {
+	if name, ok := IsProcessActive(keywords); ok {
 		return name, true
 	}
 	if name, ok := isWindowActive(keywords); ok {
@@ -155,7 +166,7 @@ func getForegroundTarget(keywords []string) (string, bool) {
 		exePath := windows.UTF16ToString(buf)
 		lowerExeName := strings.ToLower(filepath.Base(exePath))
 		for _, keyword := range keywords {
-			if strings.Contains(lowerExeName, keyword) {
+			if strings.Contains(lowerExeName, strings.ToLower(keyword)) {
 				return keyword, true
 			}
 		}
@@ -164,8 +175,8 @@ func getForegroundTarget(keywords []string) (string, bool) {
 	return "", false
 }
 
-// isProcessActive checks if any running process name contains a keyword.
-func isProcessActive(keywords []string) (string, bool) {
+// IsProcessActive checks if any running process name contains a keyword.
+func IsProcessActive(keywords []string) (string, bool) {
 	processes, err := ps.Processes()
 	if err != nil {
 		return "", false
@@ -173,7 +184,7 @@ func isProcessActive(keywords []string) (string, bool) {
 	for _, p := range processes {
 		lowerExeName := strings.ToLower(p.Executable())
 		for _, keyword := range keywords {
-			if strings.Contains(lowerExeName, keyword) {
+			if strings.Contains(lowerExeName, strings.ToLower(keyword)) {
 				return keyword, true
 			}
 		}
@@ -183,34 +194,53 @@ func isProcessActive(keywords []string) (string, bool) {
 
 // isWindowActive checks if any visible window title contains a keyword.
 func isWindowActive(keywords []string) (string, bool) {
-	var foundKeyword string
-	cb := syscall.NewCallback(func(hwnd syscall.Handle, _ uintptr) uintptr {
-		isVisible, _, _ := procIsWindowVisible.Call(uintptr(hwnd))
-		if isVisible == 0 {
-			return 1 // Continue
-		}
-		title := getWindowText(windows.HWND(hwnd))
-		if title != "" {
+	
+	// Reset global state for this enumeration run
+	enumKeywords = keywords
+	enumFoundKeyword = ""
+
+	// Initialize the static callback if it doesn't exist
+	if enumCallback == 0 {
+		enumCallback = syscall.NewCallback(func(hwnd uintptr, _ uintptr) uintptr {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("Recovered from panic in EnumWindows callback: %v", r)
+				}
+			}()
+
+			// 1. Check visibility
+			isVisible, _, _ := procIsWindowVisible.Call(hwnd)
+			if isVisible == 0 {
+				return 1 // Continue
+			}
+
+			// 2. Get window text
+			title := getWindowText(windows.HWND(hwnd))
+			if title == "" {
+				return 1 // Continue
+			}
+
+			// 3. Match keywords
 			lowerTitle := strings.ToLower(title)
-			for _, keyword := range keywords {
-				if strings.Contains(lowerTitle, keyword) {
-					foundKeyword = keyword
+			for _, keyword := range enumKeywords {
+				if strings.Contains(lowerTitle, strings.ToLower(keyword)) {
+					enumFoundKeyword = keyword
 					return 0 // Stop enumeration
 				}
 			}
-		}
-		return 1 // Continue
-	})
 
-	// A return of 0 here can mean the callback stopped it, which is not an error.
-	// A true failure is when ret is 0 AND the error is not nil.
-	ret, _, err := procEnumWindows.Call(cb, 0)
+			return 1 // Continue
+		})
+	}
+
+	// Execute the enumeration
+	ret, _, err := procEnumWindows.Call(uintptr(enumCallback), 0)
 	if ret == 0 && err != nil {
 		log.Printf("Warning: EnumWindows call failed with an error: %v", err)
 	}
 
-	if foundKeyword != "" {
-		return foundKeyword, true
+	if enumFoundKeyword != "" {
+		return enumFoundKeyword, true
 	}
 	return "", false
 }

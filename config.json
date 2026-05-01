@@ -4,9 +4,10 @@
     "profile_off": "-Profile1",
     "delay_seconds": 15,
     "monitoring_mode": "event",
+    "event_throttle_ms": 200,
     "overrides": {
         "cs2.exe": "-Profile5",
 		"gmod": "-Profile1",
-		"gtav": "-Profile2",
+		"gtav": "-Profile2"
     }
 }

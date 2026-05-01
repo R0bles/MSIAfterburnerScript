@@ -69,6 +69,7 @@ The application is controlled by the `config.json` file, which will be created w
 * **delay_seconds:** (Only used in poll mode) The number of seconds to wait between checks.
 * **monitoring_mode:** Can be "event" (recommended) or "poll". 
   * "event" mode uses system hooks to detect changes instantly, while "poll" mode checks at regular intervals from the `delay_seconds` value.
+* **event_throttle_ms:** (Only used in event mode) Limits how often the script reacts to window changes to ensure low CPU usage. Measured in milliseconds; recommended range is 200-400ms (default: 200).
 * overrides: This is your list of target applications and their specific profiles.
     * The key is the keyword to search for (case-insensitive). This can be part of a process name or window title. 
     * The value is the specific profile to apply (e.g., "-Profile4"). If you leave the value as an empty string (""), the default profile_on will be used for that target.

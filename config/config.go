@@ -17,6 +17,7 @@ type Config struct {
 	ProfileOff      string            `json:"profile_off"`
 	DelaySeconds    int               `json:"delay_seconds"`
 	MonitoringMode  string            `json:"monitoring_mode"`
+	EventThrottleMs int               `json:"event_throttle_ms"`
 	Overrides       map[string]string `json:"overrides"`
 }
 
@@ -27,6 +28,7 @@ func defaultConfig() Config {
 		ProfileOff:      "-Profile1",
 		DelaySeconds:    15,
 		MonitoringMode:  "event",
+		EventThrottleMs: 200,
 		Overrides:       make(map[string]string),
 	}
 }

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -10,6 +12,26 @@ import (
 	"MSIAfterburnerScript/config"
 	"MSIAfterburnerScript/watcher"
 )
+
+var afterburnerWarningPrinted bool
+
+// ensureAfterburnerIsRunning checks if Afterburner is active and manages the warning log to avoid spam.
+func ensureAfterburnerIsRunning(cfg *config.Config) bool {
+	afterburnerExe := filepath.Base(cfg.AfterburnerPath)
+	_, active := watcher.IsProcessActive([]string{afterburnerExe})
+
+	if !active {
+		if !afterburnerWarningPrinted {
+			log.Printf("Warning: MSI Afterburner (%s) not detected. Skipping profile check.", afterburnerExe)
+			afterburnerWarningPrinted = true
+		}
+		return false
+	}
+
+	// Reset the warning flag once Afterburner is detected again
+	afterburnerWarningPrinted = false
+	return true
+}
 
 // runAfterburner executes the MSI Afterburner command.
 func runAfterburner(exe, arg string) {
@@ -23,8 +45,12 @@ func runAfterburner(exe, arg string) {
 }
 
 // checkStateAndApplyProfile is the core logic for determining and applying a profile.
-// It now uses the Overrides map in the config as the sole list of targets.
 func checkStateAndApplyProfile(cfg *config.Config, currentProfile *string) {
+	// First, check if Afterburner is actually running using the state-aware helper.
+	if !ensureAfterburnerIsRunning(cfg) {
+		return
+	}
+
 	// The list of targets is now the keys of the Overrides map.
 	// The watcher will prioritize the foreground application.
 	activeTarget, isActive := watcher.FirstActiveTarget(cfg.Overrides)
@@ -61,11 +87,6 @@ func startPollingMode(cfg config.Config) {
 	ticker := time.NewTicker(time.Duration(cfg.DelaySeconds) * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
-		reloadedCfg := config.Load()
-		cfg.ProfileOn = reloadedCfg.ProfileOn
-		cfg.ProfileOff = reloadedCfg.ProfileOff
-		cfg.Overrides = reloadedCfg.Overrides
-		cfg.AfterburnerPath = reloadedCfg.AfterburnerPath
 		checkStateAndApplyProfile(&cfg, &currentProfile)
 	}
 }
@@ -74,24 +95,55 @@ func startPollingMode(cfg config.Config) {
 func startEventMode(cfg config.Config) {
 	log.Println("Starting in Event-Driven Mode.")
 	var currentProfile string
-	eventHandler := func() {
-		reloadedCfg := config.Load()
-		cfg.ProfileOn = reloadedCfg.ProfileOn
-		cfg.ProfileOff = reloadedCfg.ProfileOff
-		cfg.Overrides = reloadedCfg.Overrides
-		cfg.AfterburnerPath = reloadedCfg.AfterburnerPath
 
-		checkStateAndApplyProfile(&cfg, &currentProfile)
+	// Signal channel to decouple OS events from processing logic
+	eventChan := make(chan struct{}, 1)
+
+	// Worker goroutine that handles the actual profile application with throttling
+	go func() {
+		var lastExecution time.Time
+		throttleDuration := time.Duration(cfg.EventThrottleMs) * time.Millisecond
+
+		for range eventChan {
+			if time.Since(lastExecution) < throttleDuration {
+				continue
+			}
+			checkStateAndApplyProfile(&cfg, &currentProfile)
+			lastExecution = time.Now()
+		}
+	}()
+
+	// The handler now only sends a signal to the worker
+	eventHandler := func() {
+		select {
+		case eventChan <- struct{}{}:
+		default:
+			// Channel full, signal already pending
+		}
 	}
-	eventHandler()
+
+	// Initial check on startup
+	checkStateAndApplyProfile(&cfg, &currentProfile)
+
 	watcher.StartEventWatcher(eventHandler)
 	select {}
 }
 
 func main() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("CRITICAL ERROR (Panic recovered): %v", r)
+			fmt.Println("\nEl programa ha sufrido un error crítico y se ha detenido.")
+			fmt.Println("Presiona ENTER para salir...")
+			var input string
+			fmt.Scanln(&input)
+		}
+	}()
+
 	log.SetFlags(log.Ltime)
+	log.Println("Main function entered.")
 	cfg := config.Load()
-	// log.Println("Configuration loaded.")
+	log.Printf("Application started. Monitoring mode: %s", cfg.MonitoringMode)
 	switch strings.ToLower(cfg.MonitoringMode) {
 	case "poll":
 		startPollingMode(cfg)
